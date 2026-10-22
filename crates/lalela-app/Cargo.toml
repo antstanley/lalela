@@ -1,0 +1,22 @@
+[package]
+name = "lalela-app"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lalela-core = { path = "../lalela-core" }
+lalela-http = { path = "../lalela-http" }
+lalela-voxtral = { path = "../lalela-voxtral" }
+lalela-deepgram = { path = "../lalela-deepgram" }
+lalela-macos = { path = "../lalela-macos" }
+lalela-store = { path = "../lalela-store" }
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+uuid.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true

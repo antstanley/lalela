@@ -1,0 +1,7 @@
+# aarch64-apple-darwin is the only supported target (07-build-and-packaging.md).
+[build]
+target = "aarch64-apple-darwin"
+
+# rustc and the linker stamp `minos 27.0`; build.rs also asserts this value.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "27.0"

@@ -1,0 +1,9 @@
+{
+  "text": "Welcome back to the show.",
+  "language": "en",
+  "model": "voxtral-mini-2602",
+  "usage": { "total_tokens": 20 },
+  "segments": [
+    { "text": "Welcome back to the show.", "start": 0.0, "end": 2.14 }
+  ]
+}

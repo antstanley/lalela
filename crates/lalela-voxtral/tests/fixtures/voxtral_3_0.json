@@ -1,0 +1,9 @@
+{
+  "text": "Today we're talking about field recording.",
+  "language": "en",
+  "model": "voxtral-mini-transcribe-3-0",
+  "usage": { "total_tokens": 18 },
+  "segments": [
+    { "text": "Today we're talking about field recording.", "start": 0.4, "end": 4.62 }
+  ]
+}

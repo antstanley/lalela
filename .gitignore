@@ -1,0 +1,11 @@
+# Build output
+/target/
+/shim/.build/
+.DS_Store
+
+# Environment secrets
+.env
+.env.*
+
+# Swift build scratch (when the package is built from the workspace root)
+/.build/

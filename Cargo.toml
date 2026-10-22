@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lalela-core",
+    "crates/lalela-http",
+    "crates/lalela-voxtral",
+    "crates/lalela-deepgram",
+    "crates/lalela-macos",
+    "crates/lalela-store",
+    "crates/lalela-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+thiserror = "2"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+security-framework = { version = "3", default-features = false }
+eframe = "0.37"
+egui = "0.37"
+rfd = "0.15"
+uuid = { version = "1", features = ["v7"] }
+log = "0.4"
+proptest = "1"
+tempfile = "3"
+
+# Tiger Style lint baseline (development-guidelines.md §Rust conventions).
+# Note: clippy's pedantic group is not enabled workspace-wide; the project's
+# discipline is enforced by the explicit denies below plus rustfmt.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# Note: `panic` is intentionally not denied; the project's Tiger Style makes
+# `assert!` first-class code (development-guidelines.md §Assertions in Rust),
+# and clippy::panic flags those assertions.
+

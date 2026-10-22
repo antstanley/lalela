@@ -1,0 +1,27 @@
+[package]
+name = "lalela-macos"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+# The FFI boundary is the only place unsafe code is allowed
+# (architecture-principles.md §What goes where). The lint baseline otherwise
+# matches the workspace.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+# See the workspace Cargo.toml note on clippy::panic.
+
+
+[dependencies]
+lalela-core = { path = "../lalela-core" }
+security-framework.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

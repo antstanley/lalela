@@ -1,0 +1,28 @@
+{
+  "metadata": { "request_id": "req_000", "model_info": { "name": "nova-3" } },
+  "results": {
+    "channels": [
+      {
+        "alternatives": [
+          {
+            "transcript": "Today we're talking about field recording.",
+            "confidence": 0.98,
+            "paragraphs": {
+              "transcript": "Today we're talking about field recording.",
+              "paragraphs": [
+                {
+                  "sentences": [
+                    { "text": "Today we're talking about field recording.", "start": 0.4, "end": 4.62, "confidence": 0.98 }
+                  ],
+                  "start": 0.4,
+                  "end": 4.62
+                }
+              ]
+            }
+          }
+        ],
+        "detected_language": "en"
+      }
+    ]
+  }
+}

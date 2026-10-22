@@ -1,0 +1,11 @@
+[package]
+name = "lalela-http"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ureq.workspace = true
+log.workspace = true
