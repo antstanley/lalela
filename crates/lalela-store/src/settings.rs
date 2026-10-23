@@ -140,15 +140,27 @@ impl SettingsStore for JsonSettingsStore {
             }
         };
         if bytes.len() as u64 > SETTINGS_BYTES_MAX {
+            self.quarantine_invalid();
             return Err(SettingsError::Invalid {
                 detail: "settings file exceeds SETTINGS_BYTES_MAX".to_owned(),
             });
         }
-        let document: SettingsDocument =
-            serde_json::from_slice(&bytes).map_err(|error| SettingsError::Invalid {
-                detail: format!("settings decode failed: {error}"),
-            })?;
-        Self::parse(document)
+        let document: SettingsDocument = match serde_json::from_slice(&bytes) {
+            Ok(document) => document,
+            Err(error) => {
+                self.quarantine_invalid();
+                return Err(SettingsError::Invalid {
+                    detail: format!("settings decode failed: {error}"),
+                });
+            }
+        };
+        match Self::parse(document) {
+            Ok(settings) => Ok(settings),
+            Err(error) => {
+                self.quarantine_invalid();
+                Err(error)
+            }
+        }
     }
 
     fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
@@ -166,6 +178,27 @@ impl SettingsStore for JsonSettingsStore {
                 detail: format!("save settings failed: {error:?}"),
             }
         })
+    }
+}
+
+impl JsonSettingsStore {
+    /// Rename an invalid settings file to `settings.json.invalid-<unix_ms>`
+    /// so that defaults can be used without losing the bad file
+    /// (05-persistence.md §Settings). Best effort: load still reports the
+    /// error if the rename fails.
+    fn quarantine_invalid(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let target = self.path.with_file_name(format!(
+            "{}.invalid-{now}",
+            self.path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("settings.json")
+        ));
+        let _ = fs::rename(&self.path, &target);
     }
 }
 
@@ -225,6 +258,28 @@ mod tests {
             language: "auto".to_owned(),
         };
         assert!(JsonSettingsStore::parse(document).is_err());
+    }
+
+    #[test]
+    fn invalid_file_is_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let store = JsonSettingsStore::new(path.clone());
+        assert!(matches!(store.load(), Err(SettingsError::Invalid { .. })));
+        // The original file was renamed aside, so defaults work next time.
+        assert!(!path.exists());
+        let quarantined = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.invalid-")
+            });
+        assert!(quarantined);
+        assert_eq!(store.load(), Err(SettingsError::NotFound));
     }
 
     #[test]

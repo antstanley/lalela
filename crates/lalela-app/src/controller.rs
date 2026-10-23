@@ -9,7 +9,7 @@ use lalela_core::limits;
 use lalela_core::open::classify_open_path;
 use lalela_core::ports::{
     AudioPlayer, Clock, IdSource, KeySource, PlayheadState, ProviderDescriptor, ProviderId,
-    SecretStore, Settings, SettingsStore, StoreError, TranscriptStore,
+    SecretStore, Settings, SettingsStore, StoreError, TranscribeError, TranscriptStore,
 };
 use lalela_core::registry::ProviderRegistry;
 use lalela_core::save::{SavePlan, plan_save};
@@ -47,6 +47,7 @@ pub struct Controller {
     next_job: u64,
     commands: mpsc::SyncSender<Job>,
     events: mpsc::Receiver<JobOutcome>,
+    done_rx: mpsc::Receiver<()>,
     progress: Arc<ProgressCell>,
     cancel: CancelToken,
     playhead: PlayheadState,
@@ -57,6 +58,7 @@ pub struct Controller {
     settings_open: bool,
     confirm: Option<(String, String)>,
     quit_pending: bool,
+    quit_confirmed: bool,
     replanned_save: bool,
 }
 
@@ -74,12 +76,19 @@ impl Controller {
         appearance: Arc<dyn lalela_core::ports::Appearance>,
         ctx: egui::Context,
     ) -> Self {
-        let settings = settings_store
-            .load()
-            .unwrap_or_else(|_| Settings::defaults());
+        let settings_result = settings_store.load();
+        let settings = match settings_result {
+            Ok(settings) => settings,
+            Err(error) => {
+                log::warn!("settings load failed, using defaults: {error:?}");
+                Settings::defaults()
+            }
+        };
         let (commands_tx, commands_rx) =
             mpsc::sync_channel(lalela_core::limits::WORKER_COMMANDS_QUEUE_MAX);
-        let (events_tx, events_rx) = mpsc::channel();
+        let (events_tx, events_rx) =
+            mpsc::sync_channel(lalela_core::limits::WORKER_EVENTS_QUEUE_MAX);
+        let (done_tx, done_rx) = mpsc::channel();
         {
             let registry = registry.clone();
             let store = store.clone();
@@ -87,7 +96,15 @@ impl Controller {
             std::thread::Builder::new()
                 .name("lalela-worker".to_owned())
                 .spawn(move || {
-                    crate::worker::run_worker(registry, store, clock, commands_rx, events_tx, ctx)
+                    crate::worker::run_worker(
+                        registry,
+                        store,
+                        clock,
+                        commands_rx,
+                        events_tx,
+                        done_tx,
+                        ctx,
+                    )
                 })
                 .unwrap_or_else(|error| panic!("spawn worker thread failed: {error}"));
         }
@@ -114,6 +131,7 @@ impl Controller {
             next_job: 0,
             commands: commands_tx,
             events: events_rx,
+            done_rx,
             progress: Arc::new(ProgressCell::new()),
             cancel: CancelToken::new(),
             playhead: PlayheadState {
@@ -128,6 +146,7 @@ impl Controller {
             settings_open: false,
             confirm: None,
             quit_pending: false,
+            quit_confirmed: false,
             replanned_save: false,
         }
     }
@@ -256,16 +275,21 @@ impl Controller {
                 self.refresh_key_present();
             }
             crate::ui::UiIntent::Confirm(choice) => {
+                let was_quit = self.quit_pending;
                 let pending = self.pending.take();
                 self.confirm = None;
                 self.quit_pending = false;
-                if choice == crate::ui::ConfirmChoice::Proceed
-                    && let Some(action) = pending
-                {
-                    match action {
-                        PendingAction::Open(path) => self.finish_open(path),
-                        PendingAction::Transcribe => self.finish_transcribe(),
-                        PendingAction::Save(plan) => self.finish_save(plan),
+                if choice == crate::ui::ConfirmChoice::Proceed {
+                    if was_quit {
+                        // The user confirmed quitting; the app layer observes
+                        // this and issues the close command.
+                        self.quit_confirmed = true;
+                    } else if let Some(action) = pending {
+                        match action {
+                            PendingAction::Open(path) => self.finish_open(path),
+                            PendingAction::Transcribe => self.finish_transcribe(),
+                            PendingAction::Save(plan) => self.finish_save(plan),
+                        }
                     }
                 }
             }
@@ -538,7 +562,7 @@ impl Controller {
             transcript_id: self.ids.next_transcript_id(),
             audio: source.clone(),
             model,
-            language: self.settings.language.clone(),
+            language: effective_language(model, &self.settings.language),
             api_key,
         };
         let job_id = self.next_job_id();
@@ -647,17 +671,16 @@ impl Controller {
         match outcome {
             JobOutcome::Transcribed { job_id, result } => {
                 let job_id = CoreJobId::new(job_id.as_u64());
-                match result {
-                    Ok(transcript) => {
-                        self.last_error = None;
-                        self.move_state(SessionEvent::Transcribed(job_id, transcript));
+                let event = transcribe_outcome_event(&self.state, job_id, result);
+                match &event {
+                    SessionEvent::JobEnded(_) => self.last_error = None,
+                    SessionEvent::Transcribed(_, _) => self.last_error = None,
+                    SessionEvent::TranscribeEnded(_, error) => {
+                        self.last_error = Some(message_for_transcribe_error(error));
                     }
-                    Err(error) => {
-                        let message = message_for_transcribe_error(&error);
-                        self.move_state(SessionEvent::TranscribeEnded(job_id, error));
-                        self.last_error = Some(message);
-                    }
+                    _ => {}
                 }
+                self.move_state(event);
             }
             JobOutcome::Saved { job_id, result } => {
                 let job_id = CoreJobId::new(job_id.as_u64());
@@ -814,9 +837,15 @@ impl Controller {
             .map(|model| model.supports_language_hint)
             .unwrap_or(false);
 
-        let language = match &self.settings.language {
-            LanguagePreference::Auto => "Auto".to_owned(),
-            LanguagePreference::Tag(tag) => tag.as_str().to_owned(),
+        let language = if selected_model_supports_language {
+            match &self.settings.language {
+                LanguagePreference::Auto => "Auto".to_owned(),
+                LanguagePreference::Tag(tag) => tag.as_str().to_owned(),
+            }
+        } else {
+            // The model cannot take a language hint; show Auto (the request
+            // always uses Auto for such models).
+            "Auto".to_owned()
         };
 
         let primary_action = match &self.state {
@@ -920,6 +949,14 @@ impl Controller {
         self.quit_pending
     }
 
+    /// Whether the user confirmed quitting through the confirmation sheet.
+    /// Consumed by the app layer, which then issues the close command.
+    pub fn consume_quit_confirmed(&mut self) -> bool {
+        let confirmed = self.quit_confirmed;
+        self.quit_confirmed = false;
+        confirmed
+    }
+
     /// Request quit; confirms when an unsaved transcript would be lost.
     pub fn request_quit(&mut self) {
         let unsaved = matches!(
@@ -932,9 +969,146 @@ impl Controller {
         self.quit_pending = unsaved;
     }
 
-    /// Shut the worker down.
-    pub fn shutdown(&self) {
+    /// Shut the worker down, waiting at most
+    /// `WORKER_SHUTDOWN_WAIT_MS` for it to stop.
+    pub fn shutdown(&mut self) {
         let _ = self.commands.send(Job::Shutdown);
+        let wait = std::time::Duration::from_millis(lalela_core::limits::WORKER_SHUTDOWN_WAIT_MS);
+        let _ = self.done_rx.recv_timeout(wait);
+    }
+}
+
+/// The effective language for a transcription: when the selected model does
+/// not support a language hint, the request must use `Auto` (the adapter
+/// asserts this; see 02-transcription-providers.md).
+#[must_use]
+fn effective_language(
+    model: &lalela_core::ports::ModelOption,
+    settings: &LanguagePreference,
+) -> LanguagePreference {
+    if model.supports_language_hint {
+        settings.clone()
+    } else {
+        LanguagePreference::Auto
+    }
+}
+
+/// The session event for a finished transcription job. While the session is
+/// `Cancelling`, the outcome is discarded and `JobEnded` is raised (the state
+/// machine accepts only `JobEnded` from `Cancelling`); otherwise the result is
+/// carried as `Transcribed` or `TranscribeEnded`.
+#[must_use]
+fn transcribe_outcome_event(
+    state: &SessionState,
+    job_id: CoreJobId,
+    result: Result<lalela_core::transcript::Transcript, TranscribeError>,
+) -> SessionEvent {
+    if matches!(state, SessionState::Cancelling { .. }) {
+        SessionEvent::JobEnded(job_id)
+    } else {
+        match result {
+            Ok(transcript) => SessionEvent::Transcribed(job_id, transcript),
+            Err(error) => SessionEvent::TranscribeEnded(job_id, error),
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::items_after_test_module
+    )]
+    use super::*;
+    use lalela_core::audio::{AudioFormat, AudioSource};
+    use lalela_core::id::TranscriptId;
+    use lalela_core::transcript::Transcript;
+    use lalela_core::units::{Bytes, Milliseconds, ModelName};
+
+    fn audio_source() -> AudioSource {
+        AudioSource::try_new(
+            std::path::PathBuf::from("/tmp/a.m4a"),
+            AudioFormat::M4a,
+            Bytes::new(100),
+            Milliseconds::try_new(60_000).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn transcript() -> Transcript {
+        Transcript::from_parts(
+            TranscriptId::try_new("trn_01a15dcb-cdc0-7c4e-9f2d-3a6b5c4d2e1f".to_owned()).unwrap(),
+            ProviderId::Deepgram,
+            ModelName::try_new("nova-3".to_owned()).unwrap(),
+            None,
+            1,
+            Milliseconds::try_new(60_000).unwrap(),
+            vec![lalela_core::transcript::Segment {
+                start_ms: Milliseconds::try_new(0).unwrap(),
+                end_ms: Milliseconds::try_new(1_000).unwrap(),
+                text: "hello".to_owned(),
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cancelled_job_outcome_maps_to_job_ended() {
+        let state = SessionState::Empty
+            .apply(SessionEvent::Opened(audio_source()))
+            .unwrap()
+            .apply(SessionEvent::TranscribeStarted(
+                CoreJobId::new(1),
+                ProviderId::Deepgram,
+            ))
+            .unwrap()
+            .apply(SessionEvent::CancelRequested)
+            .unwrap();
+        // Even a *successful* result is discarded while cancelling.
+        let event = transcribe_outcome_event(&state, CoreJobId::new(1), Ok(transcript()));
+        assert!(matches!(event, SessionEvent::JobEnded(id) if id == CoreJobId::new(1)));
+        // And the state machine accepts it, restoring the prior (Loaded) state.
+        let next = state.apply(event).unwrap();
+        assert_eq!(next.kind(), lalela_core::session::StateKind::Loaded);
+    }
+
+    #[test]
+    fn transcribing_job_outcome_maps_to_transcribed_or_ended() {
+        let state = SessionState::Empty
+            .apply(SessionEvent::Opened(audio_source()))
+            .unwrap()
+            .apply(SessionEvent::TranscribeStarted(
+                CoreJobId::new(1),
+                ProviderId::Deepgram,
+            ))
+            .unwrap();
+        let event = transcribe_outcome_event(&state, CoreJobId::new(1), Ok(transcript()));
+        assert!(matches!(event, SessionEvent::Transcribed(id, _) if id == CoreJobId::new(1)));
+        let event =
+            transcribe_outcome_event(&state, CoreJobId::new(1), Err(TranscribeError::Timeout));
+        assert!(matches!(event, SessionEvent::TranscribeEnded(id, _) if id == CoreJobId::new(1)));
+    }
+
+    #[test]
+    fn effective_language_coerces_to_auto_without_hint() {
+        let hint_model = lalela_core::ports::ModelOption {
+            id: "m",
+            label: "m",
+            supports_language_hint: true,
+        };
+        let no_hint_model = lalela_core::ports::ModelOption {
+            id: "m",
+            label: "m",
+            supports_language_hint: false,
+        };
+        let tagged = LanguagePreference::Tag(
+            lalela_core::units::LanguageTag::try_new("fr".to_owned()).unwrap(),
+        );
+        assert_eq!(effective_language(&hint_model, &tagged), tagged);
+        assert_eq!(
+            effective_language(&no_hint_model, &tagged),
+            LanguagePreference::Auto
+        );
     }
 }
 

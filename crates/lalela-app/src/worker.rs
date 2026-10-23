@@ -130,13 +130,14 @@ impl TranscriptionObserver for JobObserver {
     }
 }
 
-/// Run the worker loop until `Shutdown`.
+/// Run the worker loop until `Shutdown`, then signal `done`.
 pub fn run_worker(
     registry: Arc<lalela_core::registry::ProviderRegistry>,
     store: Arc<dyn TranscriptStore>,
     clock: Arc<dyn Clock>,
     commands: std::sync::mpsc::Receiver<Job>,
-    events: std::sync::mpsc::Sender<JobOutcome>,
+    events: std::sync::mpsc::SyncSender<JobOutcome>,
+    done: std::sync::mpsc::Sender<()>,
     ctx: egui::Context,
 ) {
     log::info!("worker thread started");
@@ -186,6 +187,7 @@ pub fn run_worker(
         }
     }
     log::info!("worker thread stopped");
+    let _ = done.send(());
 }
 
 fn run_transcribe(

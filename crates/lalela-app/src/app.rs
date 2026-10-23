@@ -51,6 +51,21 @@ impl eframe::App for LalelaApp {
         let vm = self.controller.view_model();
         self.view_model = vm.clone();
 
+        // Polled playback and job progress need frames even without input
+        // (04-playback.md §Playhead polling, 06-app-shell.md §Worker).
+        if vm.is_playing {
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                lalela_core::limits::PLAYHEAD_REPAINT_INTERVAL_MS,
+            ));
+        }
+        if matches!(vm.status, crate::view_model::Status::Progress { .. })
+            || matches!(vm.status, crate::view_model::Status::Cancelling)
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                lalela_core::limits::PROGRESS_REPAINT_INTERVAL_MS,
+            ));
+        }
+
         ctx.style_mut_of(ctx.theme(), |style| {
             ui::theme::apply_accent(&mut style.visuals, vm.accent);
         });
@@ -79,7 +94,11 @@ impl eframe::App for LalelaApp {
             self.controller.apply(intent);
         }
 
-        if self.controller.quit_pending() {
+        // A confirmed quit (through the discard confirmation sheet) issues the
+        // close command — the original close request was consumed.
+        if self.controller.consume_quit_confirmed() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if self.controller.quit_pending() {
             self.controller.request_quit();
             if !self.controller.quit_pending() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
